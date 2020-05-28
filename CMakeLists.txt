@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 2.6)
 project(HiPIMs)
 
 find_package(CUDA)
+find_package(MPI)
 
 IF(WIN32)
     set(PLATFORM_CXX_FLAGS /Zi)
@@ -26,3 +27,4 @@ add_subdirectory(lib)
 add_subdirectory(apps/cudaFloodSolver)
 add_subdirectory(apps/cudaMultiGPUsFloodSolver)
 add_subdirectory(apps/cudaIntegratedShallowFlowSolver)
+add_subdirectory(apps/cudaMultiNodesFloodSolver)
