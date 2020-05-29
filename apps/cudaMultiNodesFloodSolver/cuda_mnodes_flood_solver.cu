@@ -24,7 +24,8 @@
 #include <functional>
 #include <cuda_runtime_api.h>
 #include <cuda.h>
-//#include <unistd.h>
+#include <unistd.h>
+#include <limits.h>
 
 //Header file for barrier
 #include "barrier.h"
@@ -75,18 +76,6 @@
 
 //using the name space for GeoClasses
 using namespace GC;
-
-std::atomic<Scalar> dt_global(0.05);
-
-Scalar dt_out = 0.5;
-Scalar backup_interval = 0.0;
-Scalar backup_time = 0.0;
-//Scalar cooldown_interval = 0.0;
-//Scalar cooldown_time = 0.0;
-Scalar t_current = 0.0;
-Scalar t_out = 0.0;
-Scalar t_all = 0.0;
-Scalar t_small = 1e-8;
 
 // void run(cuDataBank& bank, std::vector<int> device_list, unsigned int domain_id, spinning_barrier& barrier){
 
@@ -375,35 +364,126 @@ Scalar t_small = 1e-8;
 
 int main(){
 
-  printf("Welcome using HiPIMs, now enjoy the power of a true HPC!\n");
-
   MPI_Init(NULL, NULL);
-  MPI_Finalize();
-//  //---------------------
-//   std::ifstream times_setuo_file("times_setup.dat");
-//   if (!times_setuo_file) {
-//     std::cout << "Please input current time, total time, output time interval and backup interval" << std::endl;
-//     std::cin >> t_current >> t_all >> dt_out >> backup_interval;
-//   }
-//   else {
-//     Scalar _time;
-//     std::vector<Scalar> GPU_Time_Values;
-//     while (times_setuo_file >> _time) {
-//       GPU_Time_Values.push_back(_time);
-//     }
-//     t_current = GPU_Time_Values[0];
-//     t_all = GPU_Time_Values[1];
-//     dt_out = GPU_Time_Values[2];
-//     backup_interval = GPU_Time_Values[3];
-//     std::cout << "Current time: " << t_current << "s" << std::endl;
-//     std::cout << "Total time: " << t_all << "s" << std::endl;
-//     std::cout << "Output time interval: " << dt_out << "s" << std::endl;
-//     std::cout << "Backup interval: " << backup_interval << "s" << std::endl;
-//   }
-//   //---------------------
 
-//   t_out = t_current + dt_out;
-//   backup_time = t_current + backup_interval;
+  std::atomic<Scalar> dt_global(0.05);
+
+  Scalar dt_out = 0.5;
+  Scalar backup_interval = 0.0;
+  Scalar backup_time = 0.0;
+  Scalar t_current = 0.0;
+  Scalar t_out = 0.0;
+  Scalar t_all = 0.0;
+  Scalar t_small = 1e-8;
+
+  // Get the number of processes
+  int world_size;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+  // Get the rank of the process
+  int world_rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
+  // Read in time set up
+  /* if(world_rank == 0){
+
+    //---------------------
+    printf("Welcome using hipims, now enjoy the power of a true HPC!\n");
+    std::ifstream times_setup_file("times_setup.dat");
+    if (!times_setup_file) {
+      std::cout << "Please input current time, total time, output time interval and backup interval" << std::endl;
+      std::cin >> t_current >> t_all >> dt_out >> backup_interval;
+    }
+    else {
+      Scalar _time;
+      std::vector<double> GPU_Time_Values;
+      while (times_setup_file >> _time) {
+        GPU_Time_Values.push_back(_time);
+      }
+      t_current = GPU_Time_Values[0];
+      t_all = GPU_Time_Values[1];
+      dt_out = GPU_Time_Values[2];
+      backup_interval = GPU_Time_Values[3];
+      std::cout << "Current time: " << t_current << "s" << std::endl;
+      std::cout << "Total time: " << t_all << "s" << std::endl;
+      std::cout << "Output time interval: " << dt_out << "s" << std::endl;
+      std::cout << "Backup interval: " << backup_interval << "s" << std::endl;
+    }
+    t_out = t_current + dt_out;
+    backup_time = t_current + backup_interval;
+  } */
+
+  // Broadcast the time setup to all other processes
+  MPI_Barrier(MPI_COMM_WORLD);
+  MPI_Bcast(&t_current, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&t_all, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&dt_out, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&backup_interval, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&t_out, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&backup_time, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+  //assign device and domain to rank
+  char host_name[1024];
+  int domain_id;
+  int device_id;
+
+  gethostname(host_name, 1024);
+  /*//--
+  int pseudo_host_id;
+  if (world_rank < 2){
+    pseudo_host_id = 1;
+  }else{
+    pseudo_host_id = 0;
+  }
+  std::string rank = std::to_string(pseudo_host_id);
+  host_name[6] = rank.c_str()[0];
+  //--*/
+
+  char all_host_names[1024*world_size];
+  MPI_Gather(host_name, 1024, MPI_CHAR, all_host_names, 1024, MPI_CHAR, 0, MPI_COMM_WORLD);
+  std::vector<std::pair<std::string, int>> all_host_names_strs;
+  std::vector<int> domain_id_list;
+  std::vector<int> device_id_list;
+  std::vector<int> domain_id_list_sorted(world_size);
+  std::vector<int> device_id_list_sorted(world_size);
+  if (world_rank == 0){
+    for (int i = 0; i < world_size; i++){
+      std::string received_host_name(&all_host_names[i*1024]);
+      std::cout<<received_host_name<<std::endl;
+      all_host_names_strs.push_back(std::make_pair(received_host_name, i));
+      device_id_list.push_back(0);
+      domain_id_list.push_back(i);
+      //printf("%s\n",&all_host_names[i*1024]);
+    }
+    std::sort(all_host_names_strs.begin(), all_host_names_strs.end(), [](std::pair<std::string, int> s1, std::pair<std::string, int> s2){return s1.first < s2.first;});
+    for (int i = 1; i < world_size; i++){
+      //std::cout<<all_host_names_strs[i].first<<std::endl;
+      if(all_host_names_strs[i].first != all_host_names_strs[i-1].first){
+        device_id_list[i] = 0;
+      }else{
+        device_id_list[i] = device_id_list[i-1]+1;
+      }
+      //printf("%d\n", device_id_list[i]);
+    }
+  
+    for (int i = 1; i < world_size; i++){
+      int rank_id = all_host_names_strs[i].second;
+      domain_id_list_sorted[rank_id] = domain_id_list[i];
+      device_id_list_sorted[rank_id] = device_id_list[i];
+    }
+  }
+
+  MPI_Scatter(&device_id_list_sorted[0], 1, MPI_INT, &device_id, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Scatter(&domain_id_list_sorted[0], 1, MPI_INT, &domain_id, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+  checkCuda(cudaSetDevice(device_id));
+
+  printf("Rank %d uses device %d of %s for domain %d\n", world_rank, device_id, host_name, domain_id);
+  std::string file_name = std::string("log") + std::to_string(world_rank) + std::string(".txt"); 
+  FILE *output_file;
+  output_file = fopen(file_name.c_str(),"w");
+  fprintf(output_file, "Rank %d uses device %d of %s for domain %d\n", world_rank, device_id, host_name, domain_id);
+  
 
 //   int dev_count;
 //   cudaGetDeviceCount(&dev_count);
@@ -437,6 +517,8 @@ int main(){
 //   }
 
   printf("Simulation successfully finished!\n");
+
+  MPI_Finalize();
 
   return 0;
 
